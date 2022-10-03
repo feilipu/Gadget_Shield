@@ -6,13 +6,13 @@ The Gadget Shield is an add-on (shield) compatible with the Arduino Uno, Duemila
 
 It extends the functionality of the microcontroller board by adding several interesting sensors and actuators. Fully assembled and ready to go, the Gadget Shield opens up a whole world of fun and learning.
 
-All information pertaining to [the Gadget Shield has been retrieved from the Wayback Machine](https://web.archive.org/web/20121122224451/http://ruggedcircuits.com/html/gadget_shield.htm). More detailed info is to be found there.
+All information pertaining to [the Gadget Shield has been retrieved from the Wayback Machine](https://web.archive.org/web/20121122224451/http://ruggedcircuits.com/html/gadget_shield.html). More detailed info is to be found there.
 	
 ## Features
 The Gadget Shield includes:
 
 #### A Freescale MMA7660FC 3-axis digital accelerometer
-This is a 1.5g 120 sample-per-second digital accelerometer with 6-bit resolution and neat features such as tap/shake detection and tilt/orientation detection.
+This is a 1.5g 120 sample-per-second digital accelerometer with 6-bit resolution and neat features such as tap/shake detection and tilt/orientation detection. A copy of the [datasheet is available in the docs](https://github.com/feilipu/Gadget_Shield/blob/master/docs/MMA7660FC.pdf).
 
 #### A high-brightness RGB LED
 This module contains three independent LED’s (red, green, and blue) with independent brightness control for each color since each LED is connected to a separate microcontroller PWM output. This gives you an incredibly wide color palette to choose from. This thing is bright -- the manufacturer does not recommend looking directly at it when operating at maximum power, and we usually just run it at about 10%-20% duty cycles because that’s plenty bright.
@@ -49,6 +49,10 @@ Stacking headers let you stack another shield on top of the Gadget Shield, or yo
 
 #### Cuttable Jumpers
 What if you don’t want to use the microphone and want to reclaim analog pin A0 for something else? No problem! Every pin connection on the Gadget Shield goes through a cuttable jumper that is easily cut with a hobby knife. The Arduino pin is then disconnected from that pin’s gadget. You can then use the Arduino pin for something else by connecting to it through the stackable header. Changed your mind? Just short the jumper by soldering in a small wire, or solder in a two-pin 0.1” header and use a shunt to re-make the connection.
+
+## Schematic
+
+A [schematic of the AD040 Gadget Shield](https://github.com/feilipu/Gadget_Shield/blob/master/docs/ad040.pdf) can be found in the docs.
 
 ## License
 
