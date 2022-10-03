@@ -16,21 +16,23 @@
   License along with this library; if not, write to the Free Software
   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
+  Modified 2020 by Greyson Christoforo (grey@christoforo.net) to implement timeouts
+
   Modifications by Rugged Circuits LLC (February 2011) to implement
   a repeated-start condition (see new twi_writeToReadFrom function) and
   return to fixed-size buffers to avoid dynamic memory allocation overhead.
 */
 
-#ifndef twi_h
-#define twi_h
+#ifndef _GS_TWI_H_
+#define _GS_TWI_H_
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
   #include <inttypes.h>
 
   //#define ATMEGA8
-
-  #ifndef CPU_FREQ
-  #define CPU_FREQ 16000000L
-  #endif
 
   #ifndef TWI_FREQ
   #define TWI_FREQ 100000L
@@ -45,19 +47,26 @@
   #define TWI_MTX   2
   #define TWI_SRX   3
   #define TWI_STX   4
-  
+
   void twi_init(void);
+  void twi_disable(void);
   void twi_setAddress(uint8_t);
+void twi_setFrequency(uint32_t);
   uint8_t twi_readFrom(uint8_t, uint8_t*, uint8_t);
   uint8_t twi_writeTo(uint8_t, uint8_t*, uint8_t, uint8_t);
-  uint8_t twi_writeToReadFrom(uint8_t address, const uint8_t* dataTX, uint8_t lengthTX, 
-			    uint8_t *dataRX, uint8_t lengthRX, uint8_t *actualRX);
-  uint8_t twi_transmit(uint8_t*, uint8_t);
+  uint8_t twi_writeToReadFrom(uint8_t address, const uint8_t* dataTX, uint8_t lengthTX, uint8_t *dataRX, uint8_t lengthRX, uint8_t *actualRX);
+  uint8_t twi_transmit(const uint8_t*, uint8_t);
   void twi_attachSlaveRxEvent( void (*)(uint8_t*, int) );
   void twi_attachSlaveTxEvent( void (*)(void) );
   void twi_reply(uint8_t);
   void twi_stop(void);
   void twi_releaseBus(void);
+  void twi_setTimeoutInMicros(uint32_t, bool);
+  void twi_handleTimeout(bool);
+  bool twi_manageTimeoutFlag(bool);
 
+#ifdef __cplusplus
+}
 #endif
 
+#endif  /* _GS_TWI_H_ */

@@ -24,7 +24,8 @@
 
    A copy of the GNU General Public License can be viewed at <http://www.gnu.org/licenses>
  */
-#include <GadgetShield.h>
+
+#include "GadgetShield.h"
 
 // How often to take accelerometer readings
 #define SAMPLE_RATE 30  // milliseconds

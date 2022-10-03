@@ -16,6 +16,9 @@
   License along with this library; if not, write to the Free Software
   Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
 
+  Modified 2012 by Todd Krein (todd@krein.org) to implement repeated starts
+  Modified 2020 by Greyson Christoforo (grey@christoforo.net) to implement timeouts
+
   Modifications by Rugged Circuits LLC (February 2011) to implement
   a repeated-start condition (see new twi_writeToReadFrom function) and
   return to fixed-size buffers to avoid dynamic memory allocation overhead.
@@ -26,7 +29,9 @@
 #include <inttypes.h>
 #include <avr/io.h>
 #include <avr/interrupt.h>
+#include <util/delay.h>
 #include <compat/twi.h>
+#include "Arduino.h" // for digitalWrite and micros
 
 #ifndef cbi
 #define cbi(sfr, bit) (_SFR_BYTE(sfr) &= ~_BV(bit))
@@ -36,18 +41,30 @@
 #define sbi(sfr, bit) (_SFR_BYTE(sfr) |= _BV(bit))
 #endif
 
+#include "pins_arduino.h"
 #include "gs_twi.h"
 
 static volatile uint8_t twi_state;
-static uint8_t twi_slarw;
-static uint8_t twi_dostop; // Whether or not to automatically send STOP condition after transmission in order to allow for repeated start
+static volatile uint8_t twi_slarw;
+static volatile uint8_t twi_dostop; // Whether or not to automatically send STOP condition after transmission in order to allow for repeated start
+static volatile uint8_t twi_inRepStart;			// in the middle of a repeated start
+
+// twi_timeout_us > 0 prevents the code from getting stuck in various while loops here
+// if twi_timeout_us == 0 then timeout checking is disabled (the previous Wire lib behavior)
+// at some point in the future, the default twi_timeout_us value could become 25000
+// and twi_do_reset_on_timeout could become true
+// to conform to the SMBus standard
+// http://smbus.org/specs/SMBus_3_1_20180319.pdf
+static volatile uint32_t twi_timeout_us = 0ul;
+static volatile bool twi_timed_out_flag = false;  // a timeout has been seen
+static volatile bool twi_do_reset_on_timeout = false;  // reset the TWI registers on timeout
 
 static void (*twi_onSlaveTransmit)(void);
 static void (*twi_onSlaveReceive)(uint8_t*, int);
 
 static uint8_t twi_masterBuffer[TWI_BUFFER_LENGTH];
 static volatile uint8_t twi_masterBufferIndex;
-static uint8_t twi_masterBufferLength;
+static volatile uint8_t twi_masterBufferLength;
 
 static uint8_t twi_txBuffer[TWI_BUFFER_LENGTH];
 static volatile uint8_t twi_txBufferIndex;
@@ -87,7 +104,7 @@ void twi_init(void)
   // initialize twi prescaler and bit rate
   cbi(TWSR, TWPS0);
   cbi(TWSR, TWPS1);
-  TWBR = ((CPU_FREQ / TWI_FREQ) - 16) / 2;
+  TWBR = ((F_CPU / TWI_FREQ) - 16) / 2;
 
   /* twi bit rate formula from atmega128 manual pg 204
   SCL Frequency = CPU Clock Frequency / (16 + (2 * TWBR))
@@ -101,6 +118,22 @@ void twi_init(void)
 }
 
 /* 
+ * Function twi_disable
+ * Desc     disables twi pins
+ * Input    none
+ * Output   none
+ */
+void twi_disable(void)
+{
+  // disable twi module, acks, and twi interrupt
+  TWCR &= ~(_BV(TWEN) | _BV(TWIE) | _BV(TWEA));
+
+  // deactivate internal pullups for twi.
+  digitalWrite(SDA, 0);
+  digitalWrite(SCL, 0);
+}
+
+/* 
  * Function twi_slaveInit
  * Desc     sets slave address and enables interrupt
  * Input    none
@@ -110,6 +143,22 @@ void twi_setAddress(uint8_t address)
 {
   // set twi slave address (skip over TWGCE bit)
   TWAR = address << 1;
+}
+
+/* 
+ * Function twi_setFrequency
+ * Desc     sets twi bit rate
+ * Input    Clock Frequency
+ * Output   none
+ */
+void twi_setFrequency(uint32_t frequency)
+{
+  TWBR = ((F_CPU / frequency) - 16) / 2;
+  
+  /* twi bit rate formula from atmega128 manual pg 204
+  SCL Frequency = CPU Clock Frequency / (16 + (2 * TWBR))
+  note: TWBR should be 10 or higher for master mode
+  It is 72 for a 16mhz Wiring board with 100kHz TWI */
 }
 
 /* 
@@ -131,11 +180,15 @@ uint8_t twi_readFrom(uint8_t address, uint8_t* data, uint8_t length)
   }
 
   // wait until twi is ready, become master receiver
+  uint32_t startMicros = micros();
   while(TWI_READY != twi_state){
-    continue;
+    if((twi_timeout_us > 0ul) && ((micros() - startMicros) > twi_timeout_us)) {
+      twi_handleTimeout(twi_do_reset_on_timeout);
+      return 0;
+    }
   }
   twi_state = TWI_MRX;
-  // reset error state (0xFF.. no error occured)
+  // reset error state (0xFF.. no error occurred)
   twi_error = 0xFF;
 
   // initialize buffer iteration vars
@@ -143,7 +196,7 @@ uint8_t twi_readFrom(uint8_t address, uint8_t* data, uint8_t length)
   twi_masterBufferLength = length-1;  // This is not intuitive, read on...
   // On receive, the previously configured ACK/NACK setting is transmitted in
   // response to the received byte before the interrupt is signalled. 
-  // Therefor we must actually set NACK when the _next_ to last byte is
+  // Therefore we must actually set NACK when the _next_ to last byte is
   // received, causing that NACK to be sent in response to receiving the last
   // expected byte of data.
 
@@ -155,18 +208,23 @@ uint8_t twi_readFrom(uint8_t address, uint8_t* data, uint8_t length)
   TWCR = _BV(TWEN) | _BV(TWIE) | _BV(TWEA) | _BV(TWINT) | _BV(TWSTA);
 
   // wait for read operation to complete
+  startMicros = micros();
   while(TWI_MRX == twi_state){
-    continue;
+    if((twi_timeout_us > 0ul) && ((micros() - startMicros) > twi_timeout_us)) {
+      twi_handleTimeout(twi_do_reset_on_timeout);
+      return 0;
+    }
   }
 
-  if (twi_masterBufferIndex < length)
+  if (twi_masterBufferIndex < length) {
     length = twi_masterBufferIndex;
+  }
 
   // copy twi buffer to data
   for(i = 0; i < length; ++i){
     data[i] = twi_masterBuffer[i];
   }
-	
+
   return length;
 }
 
@@ -186,6 +244,7 @@ uint8_t twi_readFrom(uint8_t address, uint8_t* data, uint8_t length)
  *          2 .. address send, NACK received
  *          3 .. data send, NACK received
  *          4 .. other twi error (lost bus arbitration, bus error, ..)
+ *          5 .. timeout
  */
 uint8_t twi_writeToReadFrom(uint8_t address, const uint8_t* dataTX, uint8_t lengthTX, 
 			    uint8_t *dataRX, uint8_t lengthRX, uint8_t *actualRX)
@@ -198,8 +257,12 @@ uint8_t twi_writeToReadFrom(uint8_t address, const uint8_t* dataTX, uint8_t leng
   }
 
   // wait until twi is ready, become master transmitter
+  uint32_t startMicros = micros();
   while(TWI_READY != twi_state){
-    continue;
+    if((twi_timeout_us > 0ul) && ((micros() - startMicros) > twi_timeout_us)) {
+      twi_handleTimeout(twi_do_reset_on_timeout);
+      return (5);
+    }
   }
   twi_state = TWI_MTX;
   // reset error state (0xFF.. no error occured)
@@ -223,8 +286,12 @@ uint8_t twi_writeToReadFrom(uint8_t address, const uint8_t* dataTX, uint8_t leng
   TWCR = _BV(TWEN) | _BV(TWIE) | _BV(TWEA) | _BV(TWINT) | _BV(TWSTA);
 
   // wait for write operation to complete
+  startMicros = micros();
   while((TWI_READY != twi_state)){
-    continue;
+    if((twi_timeout_us > 0ul) && ((micros() - startMicros) > twi_timeout_us)) {
+      twi_handleTimeout(twi_do_reset_on_timeout);
+      return (5);
+    }
   }
   
   if (twi_error == 0xFF)
@@ -254,8 +321,12 @@ uint8_t twi_writeToReadFrom(uint8_t address, const uint8_t* dataTX, uint8_t leng
   TWCR = _BV(TWEN) | _BV(TWIE) | _BV(TWEA) | _BV(TWINT) | _BV(TWSTA);
 
   // wait for read operation to complete
+  startMicros = micros();
   while(TWI_MRX == twi_state){
-    continue;
+    if((twi_timeout_us > 0ul) && ((micros() - startMicros) > twi_timeout_us)) {
+      twi_handleTimeout(twi_do_reset_on_timeout);
+      return 0;
+    }
   }
 
   if (twi_masterBufferIndex < lengthRX)
@@ -283,6 +354,7 @@ uint8_t twi_writeToReadFrom(uint8_t address, const uint8_t* dataTX, uint8_t leng
  *          2 .. address send, NACK received
  *          3 .. data send, NACK received
  *          4 .. other twi error (lost bus arbitration, bus error, ..)
+ *          5 .. timeout
  */
 uint8_t twi_writeTo(uint8_t address, uint8_t* data, uint8_t length, uint8_t wait)
 {
@@ -294,11 +366,15 @@ uint8_t twi_writeTo(uint8_t address, uint8_t* data, uint8_t length, uint8_t wait
   }
 
   // wait until twi is ready, become master transmitter
+  uint32_t startMicros = micros();
   while(TWI_READY != twi_state){
-    continue;
+    if((twi_timeout_us > 0ul) && ((micros() - startMicros) > twi_timeout_us)) {
+      twi_handleTimeout(twi_do_reset_on_timeout);
+      return (5);
+    }
   }
   twi_state = TWI_MTX;
-  // reset error state (0xFF.. no error occured)
+  // reset error state (0xFF.. no error occurred)
   twi_error = 0xFF;
 
   // initialize buffer iteration vars
@@ -318,8 +394,12 @@ uint8_t twi_writeTo(uint8_t address, uint8_t* data, uint8_t length, uint8_t wait
   TWCR = _BV(TWEN) | _BV(TWIE) | _BV(TWEA) | _BV(TWINT) | _BV(TWSTA);
 
   // wait for write operation to complete
+  startMicros = micros();
   while(wait && (TWI_MTX == twi_state)){
-    continue;
+    if((twi_timeout_us > 0ul) && ((micros() - startMicros) > twi_timeout_us)) {
+      twi_handleTimeout(twi_do_reset_on_timeout);
+      return (5);
+    }
   }
   
   if (twi_error == 0xFF)
@@ -342,12 +422,12 @@ uint8_t twi_writeTo(uint8_t address, uint8_t* data, uint8_t length, uint8_t wait
  *          2 not slave transmitter
  *          0 ok
  */
-uint8_t twi_transmit(uint8_t* data, uint8_t length)
+uint8_t twi_transmit(const uint8_t* data, uint8_t length)
 {
   uint8_t i;
 
   // ensure data will fit into buffer
-  if(TWI_BUFFER_LENGTH < length){
+  if(TWI_BUFFER_LENGTH < (twi_txBufferLength+length)){
     return 1;
   }
   
@@ -357,10 +437,10 @@ uint8_t twi_transmit(uint8_t* data, uint8_t length)
   }
   
   // set length and copy data into tx buffer
-  twi_txBufferLength = length;
   for(i = 0; i < length; ++i){
-    twi_txBuffer[i] = data[i];
+    twi_txBuffer[twi_txBufferLength+i] = data[i];
   }
+  twi_txBufferLength += length;
   
   return 0;
 }
@@ -399,7 +479,7 @@ void twi_reply(uint8_t ack)
   if(ack){
     TWCR = _BV(TWEN) | _BV(TWIE) | _BV(TWINT) | _BV(TWEA);
   }else{
-	  TWCR = _BV(TWEN) | _BV(TWIE) | _BV(TWINT);
+    TWCR = _BV(TWEN) | _BV(TWIE) | _BV(TWINT);
   }
 }
 
@@ -414,10 +494,21 @@ void twi_stop(void)
   // send stop condition
   TWCR = _BV(TWEN) | _BV(TWIE) | _BV(TWEA) | _BV(TWINT) | _BV(TWSTO);
 
-  // wait for stop condition to be exectued on bus
+  // wait for stop condition to be executed on bus
   // TWINT is not set after a stop condition!
+  // We cannot use micros() from an ISR, so approximate the timeout with cycle-counted delays
+  const uint8_t us_per_loop = 8;
+  uint32_t counter = (twi_timeout_us + us_per_loop - 1)/us_per_loop; // Round up
   while(TWCR & _BV(TWSTO)){
-    continue;
+    if(twi_timeout_us > 0ul){
+      if (counter > 0ul){
+        _delay_us(us_per_loop);
+        counter--;
+      } else {
+        twi_handleTimeout(twi_do_reset_on_timeout);
+        return;
+      }
+    }
   }
 
   // update twi state
@@ -439,7 +530,60 @@ void twi_releaseBus(void)
   twi_state = TWI_READY;
 }
 
-SIGNAL(TWI_vect)
+/* 
+ * Function twi_setTimeoutInMicros
+ * Desc     set a timeout for while loops that twi might get stuck in
+ * Input    timeout value in microseconds (0 means never time out)
+ * Input    reset_with_timeout: true causes timeout events to reset twi
+ * Output   none
+ */
+void twi_setTimeoutInMicros(uint32_t timeout, bool reset_with_timeout){
+  twi_timed_out_flag = false;
+  twi_timeout_us = timeout;
+  twi_do_reset_on_timeout = reset_with_timeout;
+}
+
+/* 
+ * Function twi_handleTimeout
+ * Desc     this gets called whenever a while loop here has lasted longer than
+ *          twi_timeout_us microseconds. always sets twi_timed_out_flag
+ * Input    reset: true causes this function to reset the twi hardware interface
+ * Output   none
+ */
+void twi_handleTimeout(bool reset){
+  twi_timed_out_flag = true;
+
+  if (reset) {
+    // remember bitrate and address settings
+    uint8_t previous_TWBR = TWBR;
+    uint8_t previous_TWAR = TWAR;
+
+    // reset the interface
+    twi_disable();
+    twi_init();
+
+    // reapply the previous register values
+    TWAR = previous_TWAR;
+    TWBR = previous_TWBR;
+  }
+}
+
+/*
+ * Function twi_manageTimeoutFlag
+ * Desc     returns true if twi has seen a timeout
+ *          optionally clears the timeout flag
+ * Input    clear_flag: true if we should reset the hardware
+ * Output   the value of twi_timed_out_flag when the function was called
+ */
+bool twi_manageTimeoutFlag(bool clear_flag){
+  bool flag = twi_timed_out_flag;
+  if (clear_flag){
+    twi_timed_out_flag = false;
+  }
+  return(flag);
+}
+
+ISR(TWI_vect)
 {
   switch(TW_STATUS){
     // All Master
@@ -479,6 +623,7 @@ SIGNAL(TWI_vect)
     case TW_MR_DATA_ACK: // data received, ack sent
       // put byte into buffer
       twi_masterBuffer[twi_masterBufferIndex++] = TWDR;
+      __attribute__ ((fallthrough));
     case TW_MR_SLA_ACK:  // address sent, ack received
       // ack if more bytes are expected, otherwise nack
       if(twi_masterBufferIndex < twi_masterBufferLength){
@@ -490,6 +635,7 @@ SIGNAL(TWI_vect)
     case TW_MR_DATA_NACK: // data received, nack sent
       // put final byte into buffer
       twi_masterBuffer[twi_masterBufferIndex++] = TWDR;
+      __attribute__ ((fallthrough));
     case TW_MR_SLA_NACK: // address sent, nack received
       twi_stop();
       break;
@@ -519,6 +665,8 @@ SIGNAL(TWI_vect)
       }
       break;
     case TW_SR_STOP: // stop or repeated start condition received
+      // ack future responses and leave slave receiver state
+      twi_releaseBus();
       // put a null char after data if there's room
       if(twi_rxBufferIndex < TWI_BUFFER_LENGTH){
         twi_rxBuffer[twi_rxBufferIndex] = '\0';
@@ -558,6 +706,7 @@ SIGNAL(TWI_vect)
         twi_txBufferLength = 1;
         twi_txBuffer[0] = 0x00;
       }
+      __attribute__ ((fallthrough));		  
       // transmit first byte from buffer, fall
     case TW_ST_DATA_ACK: // byte sent, ack returned
       // copy data to output register
@@ -586,4 +735,3 @@ SIGNAL(TWI_vect)
       break;
   }
 }
-
