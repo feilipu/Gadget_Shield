@@ -40,7 +40,7 @@
    Upper 10 bits: duration, as a multiple of BASE_TEMP_MS (or 0 to indicate end-of-song)
 */
 #define MAKE_NOTE(note,dur) ((dur)<<6 | (note))
-prog_uint16_t Notes[] PROGMEM = {
+const uint16_t Notes[] PROGMEM = {
   MAKE_NOTE(19, 1), MAKE_NOTE(18, 1), MAKE_NOTE(17, 1), MAKE_NOTE(16, 1),
   MAKE_NOTE(15, 1), MAKE_NOTE(20, 1), MAKE_NOTE(19, 1), MAKE_NOTE(18, 1),
 

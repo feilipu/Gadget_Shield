@@ -123,6 +123,9 @@
 static void handleEdge(uint16_t edgeTime);
 static void handleOverflow(void);
 
+// string helper function
+static void writestr(PGM_P str);
+
 //
 //
 // Routines common to Duemilanove/Uno and Mega
