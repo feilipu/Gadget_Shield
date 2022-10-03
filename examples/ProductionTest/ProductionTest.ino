@@ -62,7 +62,6 @@ void setup() {
 }
 
 void loop() {
-  uint8_t millis_duty;
 
   // If it's time to take another accelerometer sample, do so and update our RGB LED.
   // Also do shake detection.
